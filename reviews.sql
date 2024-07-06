@@ -64,7 +64,7 @@ CREATE TABLE characteristic_reviews (
 COPY characteristic_reviews(id, characteristic_id, review_id, value)
 FROM '/Users/michaeltrofimov/reviews/characteristic_reviews.csv' DELIMITER ',' CSV HEADER;
 
-CREATE OR REPLACE FUNCTION getReviews(page INT, count INT, sort TEXT, product_id INT)
+CREATE OR REPLACE FUNCTION getReviews(page INT, count INT, sort TEXT, prod_id INT)
 RETURNS TABLE(
     id INTEGER,
     product_id INTEGER,
@@ -82,28 +82,73 @@ RETURNS TABLE(
 BEGIN
   RETURN QUERY
   SELECT
-    id,
-    product_id,
-    rating,
-    date,
-    summary,
-    body,
-    recommend,
-    reported,
-    reviewer_name,
-    reviewer_email,
-    response,
-    helpfulness
-  FROM reviews
-  WHERE reviews.product_id = $4
+    r.id,
+    r.product_id,
+    r.rating,
+    r.date,
+    r.summary,
+    r.body,
+    r.recommend,
+    r.reported,
+    r.reviewer_name,
+    r.reviewer_email,
+    r.response,
+    r.helpfulness
+  FROM reviews r
+  WHERE r.product_id = $4
   ORDER BY
     CASE
-      WHEN $3 = 'helpfulness' THEN reviews.helpfulness
-      WHEN $3 = 'newness' THEN reviews.date
-      WHEN $3 = 'relevant' THEN reviews.date + reviews.helpfulness * interval '1 second'
-      ELSE reviews.id
+      WHEN $3 = 'helpfulness' THEN r.helpfulness
+      WHEN $3 = 'newness' THEN EXTRACT(EPOCH FROM r.date)
+      WHEN $3 = 'relevant' THEN EXTRACT(EPOCH FROM r.date) + r.helpfulness
+      ELSE r.id
     END DESC
-  OFFSET ($1 - 1) * $2 ROWS FETCH FIRST $2 ROWS ONLY;
+  LIMIT $2 OFFSET ($1 - 1) * $2;
 END;
 $$ LANGUAGE PLPGSQL;
+
 SELECT * FROM getReviews(1, 1, 5);
+
+CREATE OR REPLACE FUNCTION get_review_meta(p_product_id INT)
+RETURNS TABLE(
+    product_id INT,
+    ratings JSONB,
+    recommended JSONB,
+    characteristics JSONB
+) AS $$
+BEGIN
+    RETURN QUERY
+    WITH ratings_cte AS (
+        SELECT rating, COUNT(*) as count
+        FROM reviews
+        WHERE reviews.product_id = p_product_id
+        GROUP BY rating
+    ),
+    recommended_cte AS (
+        SELECT recommend, COUNT(*) as count
+        FROM reviews
+        WHERE reviews.product_id = p_product_id
+        GROUP BY recommend
+    ),
+    characteristics_cte AS (
+        SELECT c.name, cr.characteristic_id, AVG(cr.value) as value
+        FROM characteristics c
+        JOIN characteristic_reviews cr ON c.id = cr.characteristic_id
+        WHERE c.product_id = p_product_id
+        GROUP BY c.name, cr.characteristic_id
+    )
+    SELECT
+        p_product_id AS product_id,
+        (SELECT jsonb_object_agg(rating, count) FROM ratings_cte) AS ratings,
+        (SELECT jsonb_object_agg(recommend, count) FROM recommended_cte) AS recommended,
+        (SELECT jsonb_object_agg(name, jsonb_build_object('id', characteristic_id, 'value', value)) FROM characteristics_cte) AS characteristics;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE INDEX idx_reviews_product_id ON reviews(product_id);
+CREATE INDEX idx_reviews_date ON reviews(date);
+CREATE INDEX idx_reviews_helpfulness ON reviews(helpfulness);
+CREATE INDEX idx_review_photos_review_id ON review_photos(review_id);
+CREATE INDEX idx_characteristics_product_id ON characteristics(product_id);
+CREATE INDEX idx_characteristic_reviews_characteristic_id ON characteristic_reviews(characteristic_id);
+CREATE INDEX idx_characteristic_reviews_review_id ON characteristic_reviews(review_id);
